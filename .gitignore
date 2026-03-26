@@ -1,0 +1,6 @@
+.env
+venv/
+data/
+__pycache__/
+db_nba_stats/
+.DS_Store
