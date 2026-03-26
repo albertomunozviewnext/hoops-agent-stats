@@ -1,87 +1,85 @@
 import pandas as pd
 import os
+import time
 from dotenv import load_dotenv
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 
-#1 Cargar variables de entorno
 load_dotenv()
 
 def process_csv(file_path, type_label):
     if not os.path.exists(file_path):
-        print(f"⚠️ Salteando: {file_path} (no encontrado)")
+        print(f"⚠️ Archivo no encontrado: {file_path}")
         return []
 
-    print(f"--- 📊 Analizando {type_label}: {file_path} ---")
+    print(f"--- 📊 Procesando {type_label}: {file_path} ---")
     
-    # Leemos las primeras 2000 filas para mantener el rendimiento
-    df = pd.read_csv(file_path).head(2000)
-    # Limpiamos nombres de columnas: minúsculas y sin espacios
+    # Cargamos el CSV
+    df = pd.read_csv(file_path)
     df.columns = df.columns.str.strip().str.lower()
+
+    # FILTRO POR FECHA (Usando la columna 'date')
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'])
+        # Nos quedamos solo con datos de 2024 y 2025 para no saturar
+        df = df[df['date'] >= '2024-01-01']
+    
+    # Si aún así hay muchos, limitamos a 150 filas para asegurar el éxito
+    df = df.head(150)
 
     docs = []
     for _, row in df.iterrows():
+        fecha_str = row['date'].strftime('%Y-%m-%d') if 'date' in row else "N/A"
+        
         if type_label == "jugador":
-            # Columnas típicas de NBA Advanced Player Stats
-            player = row.get('player', 'Desconocido')
-            team = row.get('team', 'N/A')
-            season = row.get('season', 'N/A')
-            per = row.get('per', 0)
-            ts_pct = row.get('ts_pct', 0)
-            usg_pct = row.get('usg_pct', 0)
-            bpm = row.get('bpm', 0) # Box Plus/Minus
-
-            content = (f"Jugador: {player} | Temporada: {season} | Equipo: {team} | "
-                       f"Eficiencia (PER): {per} | True Shooting: {ts_pct}% | "
-                       f"Usage Rate: {usg_pct}% | BPM: {bpm}")
-            
-            metadata = {"type": "player", "name": player, "season": str(season)}
-
+            content = (f"Fecha: {fecha_str} | Jugador: {row.get('player', 'N/A')} | "
+                       f"Equipo: {row.get('team', 'N/A')} | PER: {row.get('per', 0)}")
+            metadata = {"type": "player", "date": fecha_str}
         else:
-            # Columnas típicas de NBA Team Stats (Advanced)
-            team = row.get('team', 'Desconocido')
-            season = row.get('season', 'N/A')
-            off_rtg = row.get('ortg', row.get('off_rating', 0))
-            def_rtg = row.get('drtg', row.get('def_rating', 0))
-            net_rtg = row.get('nrtg', row.get('net_rating', 0))
-            pace = row.get('pace', 0)
-
-            content = (f"Equipo: {team} | Temporada: {season} | "
-                       f"Offensive Rating: {off_rtg} | Defensive Rating: {def_rtg} | "
-                       f"Net Rating: {net_rtg} | Ritmo (Pace): {pace}")
-            
-            metadata = {"type": "team", "name": team, "season": str(season)}
-
+            content = (f"Fecha: {fecha_str} | Equipo: {row.get('team', 'N/A')} | "
+                       f"Ortg: {row.get('ortg', 0)} | Drtg: {row.get('drtg', 0)}")
+            metadata = {"type": "team", "date": fecha_str}
+        
         docs.append(Document(page_content=content, metadata=metadata))
-    
     return docs
 
 def ingest_all_data():
+    # 1. Rutas de tus archivos
+    path_players = "data/advanced.csv" 
+    path_teams = "data/team_advanced.csv"
 
-    #Disponemos de dos dataset uno de jugadores y otro de equipos del año 1996 al 2025
-    #Estos dataset estan ignorados en github
-    csv_path_players = "data/advanced.csv"
-    csv_path_teams = "team_advanced.csv"
+    # 2. Recolectar todos los documentos
+    all_docs = []
+    all_docs.extend(process_csv(path_players, "jugador"))
+    all_docs.extend(process_csv(path_teams, "equipo"))
 
-    all_documents = []
-    all_documents.extend(process_csv(csv_path_players, "jugador"))
-    all_documents.extend(process_csv(csv_path_teams, "equipo"))
-
-    if not all_documents:
-        print("❌ Error: No se pudo cargar ningún dato. Revisa los nombres de los archivos en la carpeta /data.")
+    if not all_docs:
+        print("❌ No hay datos para procesar.")
         return
 
-    print(f"--- 🧠 Creando Vector Store con {len(all_documents)} documentos... ---")
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    # 3. Configurar Embeddings (Modelo correcto y estable)
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
+
+    # 4. Ingesta por Lotes (Para evitar el error 429)
+    print(f"--- 🧠 Iniciando ingesta de {len(all_docs)} documentos en lotes... ---")
     
-    vectorstore = Chroma.from_documents(
-        documents=all_documents, 
-        embedding=embeddings, 
-        persist_directory="./db_nba_stats"
-    )
-    
-    print("✅ ¡Proceso completado! Base de datos guardada en ./db_nba_stats")
+    # Creamos la base de datos vacía con el primer lote
+    batch_size = 50
+    vectorstore = Chroma(persist_directory="./db_nba_stats", embedding_function=embeddings)
+
+    for i in range(0, len(all_docs), batch_size):
+        batch = all_docs[i : i + batch_size]
+        vectorstore.add_documents(batch)
+        print(f"✅ Lote {i//batch_size + 1} completado ({min(i + batch_size, len(all_docs))}/{len(all_docs)})")
+        # Pausa de seguridad para que la API respire
+        time.sleep(2)
+
+    print("\n🔥 ¡TODO LISTO! Base de datos creada en ./db_nba_stats")
 
 if __name__ == "__main__":
     ingest_all_data()
+
+
+     
+    
