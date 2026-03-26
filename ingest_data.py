@@ -26,7 +26,7 @@ def process_csv(file_path, type_label):
         df = df[df['date'] >= '2024-01-01']
     
     # Si aún así hay muchos, limitamos a 150 filas para asegurar el éxito
-    df = df.head(150)
+    df = df.head(100)
 
     docs = []
     for _, row in df.iterrows():
@@ -62,18 +62,29 @@ def ingest_all_data():
     embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 
     # 4. Ingesta por Lotes (Para evitar el error 429)
-    print(f"--- 🧠 Iniciando ingesta de {len(all_docs)} documentos en lotes... ---")
+    print(f"--- 🧠 Ingestando {len(all_docs)} documentos con pausa de seguridad ---")
     
     # Creamos la base de datos vacía con el primer lote
-    batch_size = 50
     vectorstore = Chroma(persist_directory="./db_nba_stats", embedding_function=embeddings)
 
-    for i in range(0, len(all_docs), batch_size):
-        batch = all_docs[i : i + batch_size]
-        vectorstore.add_documents(batch)
-        print(f"✅ Lote {i//batch_size + 1} completado ({min(i + batch_size, len(all_docs))}/{len(all_docs)})")
-        # Pausa de seguridad para que la API respire
-        time.sleep(2)
+    
+    
+    for i, doc in enumerate(all_docs):
+        intentos = 0
+        while intentos < 5:
+            try:
+                vectorstore.add_documents([doc])
+                print(f"✅ [{i+1}/{len(all_docs)}] Procesado")
+                time.sleep(2)  # Pausa obligatoria entre cada uno
+                break 
+            except Exception as e:
+                if "429" in str(e):
+                    print(f"🛑 Cuota agotada. Durmiendo 70 segundos para resetear...")
+                    time.sleep(70) # Esperamos más de un minuto completo
+                    intentos += 1
+                else:
+                    print(f"❌ Error crítico: {e}")
+                    break
 
     print("\n🔥 ¡TODO LISTO! Base de datos creada en ./db_nba_stats")
 
