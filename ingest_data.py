@@ -57,7 +57,7 @@ def process_csv(file_path, type_label):
     
     return docs
 
-def ingest_nba_stats():
+def ingest_all_data():
 
     #Disponemos de dos dataset uno de jugadores y otro de equipos del año 1996 al 2025
     #Estos dataset estan ignorados en github
@@ -65,3 +65,23 @@ def ingest_nba_stats():
     csv_path_teams = "team_advanced.csv"
 
     all_documents = []
+    all_documents.extend(process_csv(csv_path_players, "jugador"))
+    all_documents.extend(process_csv(csv_path_teams, "equipo"))
+
+    if not all_documents:
+        print("❌ Error: No se pudo cargar ningún dato. Revisa los nombres de los archivos en la carpeta /data.")
+        return
+
+    print(f"--- 🧠 Creando Vector Store con {len(all_documents)} documentos... ---")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    
+    vectorstore = Chroma.from_documents(
+        documents=all_documents, 
+        embedding=embeddings, 
+        persist_directory="./db_nba_stats"
+    )
+    
+    print("✅ ¡Proceso completado! Base de datos guardada en ./db_nba_stats")
+
+if __name__ == "__main__":
+    ingest_all_data()
